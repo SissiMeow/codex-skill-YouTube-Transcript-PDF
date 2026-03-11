@@ -1,0 +1,4 @@
+interface:
+  display_name: "YouTube Transcript"
+  short_description: "Create polished YouTube transcript PDFs"
+  default_prompt: "Use $youtube-transcript to turn this YouTube video into a polished transcript PDF."
