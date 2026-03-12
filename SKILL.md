@@ -73,8 +73,12 @@ Model the reading experience on OpenAI longform posts such as the Harness Engine
 
 - Start with an overline or section label such as `YouTube Transcript`.
 - Put the title first.
+- Keep page 1 free of the repeated page-header label and top divider block.
+- On page 2 and later, place the top divider so its distance to the page top matches the bottom divider's distance to the page bottom.
+- Put the `Sissi Skill - YouTube Transcript to PDF` page label just above that top divider on page 2 and later.
 - Put the publication date and source metadata directly under the title.
 - Put the chapter list near the top of the document.
+- Reinsert chapter headings inside the transcript body at their corresponding locations when chapter metadata exists.
 - Keep paragraphs short and readable.
 - Justify body paragraphs so the text block width matches the divider line width.
 - Merge caption fragments into prose-like paragraphs.
@@ -85,6 +89,7 @@ Model the reading experience on OpenAI longform posts such as the Harness Engine
 - Insert 20-minute markers only as coarse navigation aids.
 - If the video is shorter than 20 minutes, omit markers entirely.
 - Reserve a footer whitespace band on every page and separate it from body text with a grey horizontal rule.
+- Let body text run close to the footer divider so the final line sits roughly one line above it without overlap.
 
 ## Readability Heuristics
 
@@ -118,6 +123,8 @@ Example:
 ## Helper Scripts
 
 Use `scripts/assemble_transcript.py` to turn timed segments into readable transcript prose with coarse markers.
+When chapter titles need to be inserted into the transcript body at precise positions, also write paragraph metadata JSON from the same script and pass it to the PDF renderer.
+If reliable source chapters exist, also pass them into `assemble_transcript.py` so paragraph boundaries can align with chapter boundaries before PDF rendering.
 
 Use `scripts/render_blog_pdf.py` to turn metadata, summary, chapters, and transcript text into a polished PDF without external PDF dependencies.
 
@@ -125,12 +132,14 @@ Typical flow:
 
 ```bash
 python scripts/assemble_transcript.py segments.json --output transcript.txt
+python scripts/assemble_transcript.py segments.json --output transcript.txt --metadata-output transcript-metadata.json --chapter-breaks-json chapters.json
 python scripts/render_blog_pdf.py \
   --title "Cult Leaders Have Terrible Pitches" \
   --date "September 16, 2025" \
   --channel "The Knowledge Project Podcast" \
   --summary-file summary.txt \
   --chapters-json chapters.json \
+  --transcript-metadata-json transcript-metadata.json \
   --transcript transcript.txt \
   --output ./cult-leaders-have-terrible-pitches.pdf
 ```
@@ -142,6 +151,9 @@ Before returning the result, verify:
 - The transcript language matches the source content unless translation was explicitly requested
 - The transcript is materially complete
 - The chapter list is coherent
+- Inline chapter headings appear at the right transcript positions when source chapters exist
+- If adjacent chapter timestamps are less than one minute apart, collapse them to a single inline chapter heading
+- Omit timestamps from inline chapter headings inside the transcript body
 - The document has title, date, and source metadata
 - The PDF was written successfully inside the project folder
 - Body text is justified and aligned to the same width as the divider rules

@@ -25,6 +25,10 @@ def parse_args() -> argparse.Namespace:
         help="Path to write the transcript. Defaults to stdout.",
     )
     parser.add_argument(
+        "--metadata-output",
+        help="Optional JSON path for paragraph metadata with start times.",
+    )
+    parser.add_argument(
         "--interval-minutes",
         type=int,
         default=20,
@@ -41,6 +45,10 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=7.0,
         help="Start a new paragraph after time gaps larger than this (default: 7).",
+    )
+    parser.add_argument(
+        "--chapter-breaks-json",
+        help="Optional JSON file with chapter start_time values to force paragraph breaks.",
     )
     return parser.parse_args()
 
@@ -59,6 +67,23 @@ def load_segments(path: Path) -> list[dict]:
         start = float(item.get("start", 0))
         segments.append({"start": start, "text": text})
     return segments
+
+
+def load_chapter_breaks(path: str | None) -> list[float]:
+    if not path:
+        return []
+    data = json.loads(Path(path).read_text())
+    if not isinstance(data, list):
+        raise ValueError("chapter-breaks-json must contain a list")
+    breaks = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        start_time = item.get("start_time")
+        if start_time is None:
+            continue
+        breaks.append(float(start_time))
+    return sorted(set(breaks))
 
 
 def normalize_text(text: str) -> str:
@@ -84,14 +109,14 @@ def looks_like_sentence_end(text: str) -> bool:
     return text.endswith((".", "?", "!", '"', "'"))
 
 
-def flush_paragraph(parts: list[str], paragraphs: list[str]) -> None:
+def flush_paragraph(parts: list[dict], paragraphs: list[dict]) -> None:
     if not parts:
         return
-    paragraph = " ".join(parts)
+    paragraph = " ".join(part["text"] for part in parts)
     paragraph = re.sub(r"\s+", " ", paragraph).strip()
     if not paragraph:
         return
-    paragraphs.append(paragraph)
+    paragraphs.append({"type": "paragraph", "start": parts[0]["start"], "text": paragraph})
     parts.clear()
 
 
@@ -101,13 +126,30 @@ def assemble_text(
     max_paragraph_words: int,
     gap_seconds: float,
 ) -> str:
-    if not segments:
-        return ""
+    return assemble_blocks(
+        segments,
+        interval_minutes=interval_minutes,
+        max_paragraph_words=max_paragraph_words,
+        gap_seconds=gap_seconds,
+    )
 
+
+def assemble_blocks(
+    segments: list[dict],
+    interval_minutes: int,
+    max_paragraph_words: int,
+    gap_seconds: float,
+    chapter_breaks: list[float] | None = None,
+) -> list[dict]:
+    if not segments:
+        return []
+
+    chapter_breaks = chapter_breaks or []
+    chapter_index = 0
     interval_seconds = max(1, interval_minutes) * 60
     next_marker = interval_seconds
     blocks: list[str] = []
-    current_parts: list[str] = []
+    current_parts: list[dict] = []
     current_words = 0
     previous_start: float | None = None
     previous_text = ""
@@ -118,6 +160,12 @@ def assemble_text(
         if text == previous_text:
             continue
 
+        while chapter_index < len(chapter_breaks) and start >= chapter_breaks[chapter_index]:
+            if current_parts and current_parts[0]["start"] < chapter_breaks[chapter_index]:
+                flush_paragraph(current_parts, blocks)
+                current_words = 0
+            chapter_index += 1
+
         if previous_start is not None and start - previous_start >= gap_seconds and current_words >= 40:
             flush_paragraph(current_parts, blocks)
             current_words = 0
@@ -125,10 +173,10 @@ def assemble_text(
         while start >= next_marker:
             flush_paragraph(current_parts, blocks)
             current_words = 0
-            blocks.append(format_marker(next_marker))
+            blocks.append({"type": "marker", "start": float(next_marker), "text": format_marker(next_marker)})
             next_marker += interval_seconds
 
-        current_parts.append(text)
+        current_parts.append({"start": start, "text": text})
         current_words += len(text.split())
 
         if current_words >= max_paragraph_words and looks_like_sentence_end(text):
@@ -139,7 +187,25 @@ def assemble_text(
         previous_text = text
 
     flush_paragraph(current_parts, blocks)
-    return "\n\n".join(blocks).strip() + "\n"
+    return blocks
+
+
+def assemble_text(
+    segments: list[dict],
+    interval_minutes: int,
+    max_paragraph_words: int,
+    gap_seconds: float,
+    chapter_breaks: list[float] | None = None,
+) -> str:
+    blocks = assemble_blocks(
+        segments,
+        interval_minutes=interval_minutes,
+        max_paragraph_words=max_paragraph_words,
+        gap_seconds=gap_seconds,
+        chapter_breaks=chapter_breaks,
+    )
+    texts = [block["text"] for block in blocks]
+    return "\n\n".join(texts).strip() + "\n"
 
 
 def main() -> None:
@@ -150,11 +216,21 @@ def main() -> None:
         interval_minutes=args.interval_minutes,
         max_paragraph_words=args.max_paragraph_words,
         gap_seconds=args.gap_seconds,
+        chapter_breaks=load_chapter_breaks(args.chapter_breaks_json),
     )
     if args.output:
         Path(args.output).write_text(transcript)
     else:
         print(transcript, end="")
+    if args.metadata_output:
+        blocks = assemble_blocks(
+            segments,
+            interval_minutes=args.interval_minutes,
+            max_paragraph_words=args.max_paragraph_words,
+            gap_seconds=args.gap_seconds,
+            chapter_breaks=load_chapter_breaks(args.chapter_breaks_json),
+        )
+        Path(args.metadata_output).write_text(json.dumps(blocks, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

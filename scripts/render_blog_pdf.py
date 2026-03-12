@@ -26,7 +26,9 @@ TOP_MARGIN = 72
 BOTTOM_MARGIN = 72
 CONTENT_WIDTH = PAGE_WIDTH - LEFT_MARGIN - RIGHT_MARGIN
 FOOTER_RULE_Y = BOTTOM_MARGIN / 2
-BODY_BOTTOM_Y = FOOTER_RULE_Y + 22
+BODY_BOTTOM_Y = FOOTER_RULE_Y
+HEADER_RULE_Y = PAGE_HEIGHT - FOOTER_RULE_Y
+HEADER_LABEL_GAP = 10
 
 FONT_MAP = {
     "sans": "F1",
@@ -60,6 +62,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--summary-file", help="Path to a summary text file")
     parser.add_argument("--chapters-json", help="Path to a chapters JSON file")
     parser.add_argument("--transcript", required=True, help="Transcript text file")
+    parser.add_argument(
+        "--transcript-metadata-json",
+        help="Optional JSON produced by assemble_transcript.py with paragraph start times.",
+    )
     parser.add_argument(
         "--output",
         help="Output PDF path. Defaults to ./<slug>.pdf",
@@ -113,11 +119,46 @@ def load_chapters(path: str | None) -> list[dict]:
     return [chapter for chapter in chapters if chapter["title"]]
 
 
+def filter_close_chapters(chapters: list[dict], min_gap_seconds: float = 60.0) -> list[dict]:
+    if not chapters:
+        return []
+    filtered = [chapters[0]]
+    for chapter in chapters[1:]:
+        if chapter["start_time"] - filtered[-1]["start_time"] < min_gap_seconds:
+            filtered[-1] = chapter
+        else:
+            filtered.append(chapter)
+    return filtered
+
+
 def load_transcript(path: str) -> list[str]:
     text = Path(path).read_text().strip()
     if not text:
         return []
     return [block.strip() for block in text.split("\n\n") if block.strip()]
+
+
+def load_transcript_metadata(path: str | None) -> list[dict]:
+    if not path:
+        return []
+    data = json.loads(Path(path).read_text())
+    if not isinstance(data, list):
+        raise ValueError("transcript-metadata-json must contain a list")
+    blocks = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text", "")).strip()
+        if not text:
+            continue
+        blocks.append(
+            {
+                "type": str(item.get("type", "paragraph")),
+                "start": float(item.get("start", 0)),
+                "text": text,
+            }
+        )
+    return blocks
 
 
 def format_time(seconds: float) -> str:
@@ -179,11 +220,36 @@ class PDFDocument:
         self.current_ops: list[str] = []
         self.cursor_y = PAGE_HEIGHT - TOP_MARGIN
         self.page_number = 0
+        self.body_start_index = 0
         self.new_page()
+
+    def shift_operation_y(self, op: str, delta: float) -> str:
+        def shift_text(match: re.Match[str]) -> str:
+            x = match.group(1)
+            y = float(match.group(2)) - delta
+            return f"1 0 0 1 {x} {y:.2f} Tm"
+
+        def shift_line(match: re.Match[str]) -> str:
+            x1 = match.group(1)
+            y1 = float(match.group(2)) - delta
+            x2 = match.group(3)
+            y2 = float(match.group(4)) - delta
+            return f"{x1} {y1:.2f} m {x2} {y2:.2f} l"
+
+        op = re.sub(r"1 0 0 1 ([0-9.]+) ([0-9.]+) Tm", shift_text, op)
+        op = re.sub(r"([0-9.]+) ([0-9.]+) m ([0-9.]+) ([0-9.]+) l", shift_line, op)
+        return op
 
     def close_page(self) -> None:
         if not self.current_ops:
             return
+        if self.page_number > 1:
+            slack = max(0.0, self.cursor_y - BODY_BOTTOM_Y)
+            if slack > 0:
+                self.current_ops[self.body_start_index :] = [
+                    self.shift_operation_y(op, slack)
+                    for op in self.current_ops[self.body_start_index :]
+                ]
         self.current_ops.append(
             f"q 0.85 G 1 w {LEFT_MARGIN} {FOOTER_RULE_Y:.2f} m "
             f"{PAGE_WIDTH - RIGHT_MARGIN} {FOOTER_RULE_Y:.2f} l S Q"
@@ -196,14 +262,19 @@ class PDFDocument:
         self.current_ops = []
         self.cursor_y = PAGE_HEIGHT - TOP_MARGIN
         self.page_number += 1
-        self.draw_page_label()
+        if self.page_number > 1:
+            self.draw_page_label()
+        self.body_start_index = len(self.current_ops)
 
     def draw_page_label(self) -> None:
         style = TextStyle("sans", 9, 12, (0.45, 0.45, 0.45))
-        self.write_line("Sissi Skill - YouTube Transcript to PDF", LEFT_MARGIN, self.cursor_y, style)
-        self.cursor_y -= 18
-        self.draw_rule()
-        self.cursor_y -= 20
+        label_y = HEADER_RULE_Y + HEADER_LABEL_GAP
+        self.write_line("Sissi Skill - YouTube Transcript to PDF", LEFT_MARGIN, label_y, style)
+        self.current_ops.append(
+            f"q 0.85 G 1 w {LEFT_MARGIN} {HEADER_RULE_Y:.2f} m "
+            f"{PAGE_WIDTH - RIGHT_MARGIN} {HEADER_RULE_Y:.2f} l S Q"
+        )
+        self.cursor_y = HEADER_RULE_Y - 28
 
     def ensure_space(self, needed: float) -> None:
         if self.cursor_y - needed < BODY_BOTTOM_Y:
@@ -263,6 +334,11 @@ class PDFDocument:
     def add_heading(self, text: str, size: int, space_after: int = 10) -> None:
         style = TextStyle("sans-bold", size, int(size * 1.2), (0.05, 0.05, 0.05))
         self.add_block(text, style, space_after=space_after)
+
+    def add_inline_chapter_heading(self, text: str, timestamp: float) -> None:
+        self.cursor_y -= 6
+        style = TextStyle("sans-bold", 13, 17, (0.10, 0.10, 0.10))
+        self.add_block(text, style, space_after=8)
 
     def add_meta(self, text: str) -> None:
         style = TextStyle("sans", 11, 15, (0.35, 0.35, 0.35))
@@ -355,10 +431,24 @@ def build_meta(args: argparse.Namespace) -> list[str]:
     return lines
 
 
+def chapter_key(seconds: float) -> int:
+    return int(round(seconds * 10))
+
+
+def chapter_lookup(chapters: list[dict]) -> dict[int, list[dict]]:
+    lookup: dict[int, list[dict]] = {}
+    for chapter in chapters:
+        lookup.setdefault(chapter_key(chapter["start_time"]), []).append(chapter)
+    return lookup
+
+
 def render_pdf(args: argparse.Namespace) -> Path:
     transcript_blocks = load_transcript(args.transcript)
+    transcript_metadata = load_transcript_metadata(args.transcript_metadata_json)
     summary_blocks = load_summary(args.summary_file)
-    chapters = load_chapters(args.chapters_json)
+    chapters = filter_close_chapters(load_chapters(args.chapters_json))
+    chapters_by_key = chapter_lookup(chapters)
+    rendered_chapter_keys: set[int] = set()
 
     output = Path(args.output) if args.output else Path.cwd() / f"{slugify(args.title)}.pdf"
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -384,11 +474,26 @@ def render_pdf(args: argparse.Namespace) -> Path:
         doc.add_chapter_list(chapters)
 
     doc.add_heading("Transcript", 15, space_after=6)
-    for block in transcript_blocks:
-        if is_marker(block):
-            doc.add_marker(block)
-        else:
-            doc.add_paragraph(block)
+    if transcript_metadata:
+        for block in transcript_metadata:
+            start = block["start"]
+            for chapter in chapters:
+                key = chapter_key(chapter["start_time"])
+                if key in rendered_chapter_keys:
+                    continue
+                if start >= chapter["start_time"]:
+                    doc.add_inline_chapter_heading(chapter["title"], chapter["start_time"])
+                    rendered_chapter_keys.add(key)
+            if block["type"] == "marker":
+                doc.add_marker(block["text"])
+            else:
+                doc.add_paragraph(block["text"])
+    else:
+        for block in transcript_blocks:
+            if is_marker(block):
+                doc.add_marker(block)
+            else:
+                doc.add_paragraph(block)
 
     output.write_bytes(doc.finalize())
     return output
