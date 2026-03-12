@@ -1,6 +1,6 @@
 ---
 name: youtube-transcript
-description: Extract transcripts from YouTube videos and turn them into polished article-style deliverables. Use when a user provides a YouTube URL and wants native-caption extraction, ASR fallback, a readable transcript with title/date/chapter information, OpenAI-blog-inspired longform formatting, a summary, chapter breakdown, or a final PDF saved inside the current project folder. Add Chinese translation only when explicitly requested.
+description: Extract transcripts from YouTube videos and turn them into polished article-style deliverables. Use when a user provides a YouTube URL and asks for transcript extraction, subtitle capture, readable longform transcript cleanup, video summarization from the transcript, chapter reconstruction, or a final PDF saved in the current project folder. Preserve the source language by default and add Chinese translation only when explicitly requested. Do not use for casual discussion about a YouTube video unless the user asks for transcript extraction, summarization, or document creation.
 ---
 
 # YouTube Transcript
@@ -12,14 +12,26 @@ Turn a YouTube URL into a polished reading artifact, not a raw dump of captions.
 ## Workflow
 
 1. Confirm the input is a YouTube URL.
-2. Inspect whether native subtitles or auto-generated captions are available.
-3. Extract captions when possible because they are faster and cheaper than ASR.
+2. Gather metadata and inspect whether native subtitles or auto-generated captions are available.
+3. Prefer caption extraction because it is faster and cheaper than ASR.
 4. Fall back to speech-to-text only if caption extraction fails or the result is materially incomplete.
 5. Gather metadata: title, publication date, channel, URL, and source chapters when available.
 6. Normalize the transcript into readable paragraphs instead of caption fragments.
 7. Build a document with title, date, source metadata, summary, chapter list, and transcript body.
 8. Save the final deliverable as a PDF inside the current project folder.
 9. Add Chinese translation only when the prompt explicitly asks for it.
+
+## Environment Contract
+
+Expect the environment to provide:
+
+- `python3`
+- Network access to read the YouTube page and any transcript source
+- `yt-dlp` for metadata and subtitle extraction on the caption-first path
+- Either a local Whisper-compatible ASR tool or a hosted transcription API for fallback
+- The bundled scripts in `scripts/`
+
+If any required capability is missing, say exactly which dependency is unavailable and stop before claiming the transcript is complete.
 
 ## Source Selection
 
@@ -36,7 +48,7 @@ Prefer this path when native subtitles or auto-generated YouTube captions exist.
 Useful tools if available in the environment:
 
 - `yt-dlp` for metadata and subtitle extraction
-- Any local caption downloader already present in the repo or machine
+- The canonical extraction wrapper in `scripts/` when present
 
 ### ASR fallback path
 
@@ -52,6 +64,22 @@ Common options if available:
 
 - Local Whisper / faster-whisper
 - Hosted transcription API
+
+## Failure Policy
+
+Stop and explain the failure if any of the following is true:
+
+- The input is not a valid YouTube URL
+- Metadata cannot be fetched
+- Captions are unavailable and no ASR fallback is available
+- Audio download fails for the ASR path
+- The transcript is too incomplete to support a trustworthy summary
+
+Continue with a warning when work is possible but quality is limited:
+
+- Captions exist but appear partial, noisy, or desynchronized
+- ASR finishes but punctuation or speaker boundaries are weak
+- Chapter boundaries must be inferred from noisy transcript text
 
 ## Output Contract
 
@@ -110,6 +138,47 @@ After building the transcript, create:
 
 If the source data already contains reliable chapter metadata, reuse it. Otherwise infer chapters from topic shifts in the transcript.
 
+## Examples
+
+Example 1: Podcast transcript package
+
+- User says: "Turn this YouTube interview into a clean PDF transcript."
+- Actions:
+  1. Fetch metadata and caption availability.
+  2. Prefer manual captions when available.
+  3. Normalize transcript paragraphs.
+  4. Generate summary and chapter list.
+  5. Render PDF in the current project folder.
+- Result: Article-style transcript PDF plus summary and chapter breakdown.
+
+Example 2: Summary plus transcript from a keynote
+
+- User says: "Extract the transcript from this keynote and summarize each section."
+- Actions:
+  1. Extract captions or use ASR fallback.
+  2. Reuse source chapters when present, otherwise infer them.
+  3. Build a concise summary aligned to the chapter structure.
+  4. Save the final PDF and return the summary in chat.
+- Result: Usable reading artifact instead of raw subtitle text.
+
+Example 3: Preserve source language
+
+- User says: "Make a readable transcript from this Spanish YouTube talk."
+- Actions:
+  1. Preserve the Spanish transcript.
+  2. Do not translate unless explicitly asked.
+  3. Flag source-quality issues if captions are weak.
+- Result: Spanish transcript package with honest quality notes.
+
+Example 4: Explicit translation request
+
+- User says: "Create a transcript PDF from this YouTube video and add a Chinese translation."
+- Actions:
+  1. Extract the source transcript first.
+  2. Produce the polished source-language transcript.
+  3. Add Chinese translation because it was explicitly requested.
+- Result: Transcript package that clearly distinguishes source text from translated text.
+
 ## Output Location
 
 Save the final PDF inside the current project folder unless the user asks for another path. Prefer a slugged filename derived from the video title.
@@ -122,26 +191,36 @@ Example:
 
 ## Helper Scripts
 
+Use `scripts/fetch_youtube_transcript.py` as the canonical extraction entrypoint. It must be the first script in the flow because it centralizes URL validation, metadata fetch, caption selection, quality checks, and optional ASR fallback.
+Use `scripts/asr_faster_whisper.py` when captions are unavailable and audio can be downloaded. It writes segment JSON for the fallback path using a local faster-whisper model.
+
 Use `scripts/assemble_transcript.py` to turn timed segments into readable transcript prose with coarse markers.
 When chapter titles need to be inserted into the transcript body at precise positions, also write paragraph metadata JSON from the same script and pass it to the PDF renderer.
 If reliable source chapters exist, also pass them into `assemble_transcript.py` so paragraph boundaries can align with chapter boundaries before PDF rendering.
 
 Use `scripts/render_blog_pdf.py` to turn metadata, summary, chapters, and transcript text into a polished PDF without external PDF dependencies.
+Use `scripts/validate_transcript_skill.py` during development to run offline regression checks for VTT parsing, overlap cleanup, marker insertion, chapter-aware transcript metadata, and PDF rendering.
+Use `scripts/package_skill_release.py` before distribution to build a clean zip that excludes repo-only files such as `README.md`, `.git/`, `tests/`, and `__pycache__/`.
 
 Typical flow:
 
 ```bash
-python scripts/assemble_transcript.py segments.json --output transcript.txt
-python scripts/assemble_transcript.py segments.json --output transcript.txt --metadata-output transcript-metadata.json --chapter-breaks-json chapters.json
+python scripts/fetch_youtube_transcript.py "https://www.youtube.com/watch?v=VIDEO_ID" --output-dir ./youtube_transcript_work
+python scripts/asr_faster_whisper.py ./downloaded-audio.m4a --output ./youtube_transcript_work/segments.json --model small --device cpu --compute-type int8 --beam-size 1 --vad-filter
+python scripts/assemble_transcript.py ./youtube_transcript_work/segments.json --output transcript.txt
+python scripts/assemble_transcript.py ./youtube_transcript_work/segments.json --output transcript.txt --metadata-output transcript-metadata.json --chapter-breaks-json ./youtube_transcript_work/chapters.json
+# Then read title/date/channel from ./youtube_transcript_work/metadata.json and pass them into the renderer.
 python scripts/render_blog_pdf.py \
   --title "Cult Leaders Have Terrible Pitches" \
-  --date "September 16, 2025" \
+  --date "2025-09-16" \
   --channel "The Knowledge Project Podcast" \
   --summary-file summary.txt \
-  --chapters-json chapters.json \
+  --chapters-json ./youtube_transcript_work/chapters.json \
   --transcript-metadata-json transcript-metadata.json \
   --transcript transcript.txt \
   --output ./cult-leaders-have-terrible-pitches.pdf
+python scripts/validate_transcript_skill.py
+python scripts/package_skill_release.py
 ```
 
 ## Quality Checks
@@ -161,6 +240,38 @@ Before returning the result, verify:
 - The final document is readable as an article, not as raw subtitles
 
 If extraction quality is poor, say so briefly and state whether the weakness comes from source captions or ASR.
+
+## Troubleshooting
+
+### No captions found
+
+- Cause: The video has no manual or auto-generated captions.
+- Action: Use ASR only if an ASR dependency is available. Otherwise stop and report the missing capability.
+
+### Captions look incomplete
+
+- Cause: Subtitle track omits spoken sections or is materially desynchronized.
+- Action: Switch to ASR when available and say why the caption path was rejected.
+
+### Wrong language track selected
+
+- Cause: Multiple subtitle tracks exist and the wrong one was chosen automatically.
+- Action: Prefer the original spoken language when known. If ambiguous, report the ambiguity and ask for a language only if it blocks reliable extraction.
+
+### ASR fallback unavailable
+
+- Cause: No local or hosted transcription path exists.
+- Action: Report the missing dependency instead of pretending the transcript is complete.
+
+### PDF renders but formatting is degraded
+
+- Cause: Transcript blocks are too long, metadata is missing, or chapter placement is noisy.
+- Action: Re-check transcript normalization, chapter inputs, and rendering inputs before returning the file.
+
+### User wants only a summary
+
+- Cause: The user asked for analysis but not a PDF deliverable.
+- Action: Still extract or inspect the transcript as needed, but do not force PDF generation when the user explicitly wants summary-only output.
 
 ## Response Pattern
 
